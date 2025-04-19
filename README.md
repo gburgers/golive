@@ -22,10 +22,11 @@ Go developers looking to simplify and accelerate their development process, espe
 ### Installation
 
 git clone https://github.com/yourusername/golive.git
+
 cd golive
 chmod +x golive # Ensure it's executable
 sudo cp golive /usr/local/bin/ # Optional: install system-wide
 
 ### Usage
 
-(Include usage instructions here)
+Make sure the golive binary is in your $PATH and run 'golive' in the root of your Go project.
