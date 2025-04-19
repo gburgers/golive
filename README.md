@@ -21,7 +21,7 @@ Go developers looking to simplify and accelerate their development process, espe
 
 ### Installation
 
-git clone https://github.com/yourusername/golive.git
+git clone https://github.com/gburgers/golive.git
 
 cd golive  
 chmod +x golive # Ensure it's executable  
