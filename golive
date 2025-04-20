@@ -5,112 +5,116 @@ set -e
 PID_FILE=".goliveserver.pid"
 export PID_FILE
 
+log() {
+    echo "[$(date '+%H:%M:%S')] $*"
+}
+
 cleanup() {
 
     if [ -f "$PID_FILE" ]; then
         pid=$(<"$PID_FILE")
 
         if ps -p "$pid" >/dev/null 2>&1; then
-            kill "$pid" && echo ">>> GoLive server gracefully stopped!"
+            if kill "$pid" 2>/dev/null; then
+                log ">>> GoLive server gracefully stopped!"
+                echo
+            elif kill -9 "$pid" 2>/dev/null; then
+                log ">>> GoLive server killed!"
+            else
+                log ">>> Failed to kill process $pid"
+            fi
 
-        # elif ps -p "$pid" >/dev/null 2>&1; then
-        #     kill -9 "$pid" 2>/dev/null && echo ">>> GoLive server killed!"
-        # elif ps -p "$pid" >/dev/null 2>&1; then
-        #     echo ">>> Failed to kill process "$pid"
         else
-            echo ">>> PID exists but no running GoLive server"
+            log ">>> PID exists but no matching GoLive server"
         fi
 
         rm -f "$PID_FILE"
-        return 0
+        # log ">>> PID file removed"
 
     else
-        echo ">>> Nothing to clean up"
+        log ">>> No PID file found"
     fi
 
-    if pgrep -f "^./goliveserver$" >/dev/null; then
-        kill $(pgrep -f ".goliveserver")
-        echo ">>> GoLive server gracefully stopped!"
-        rm "$PID_FILE" 2>/dev/null
-        return 0
-    elif [ -f .goliveserver.pid ] && ps -p "$(<".goliveserver.pid")" >/dev/null 2>&1; then
-        kill "$(<"$PID_FILE")"
-        echo ">>> GoLive server gracefully killed!"
-        rm "$PID_FILE" 2>/dev/null
-        return 0
-    else
-        echo ">>> No active GoLive server"
-        return 0
+    if pid_fallback=$(pgrep -f '^./goliveserver$'); then
+
+        if [ -n "$pid_fallback" ]; then
+            if kill "$pid_fallback" 2>/dev/null; then
+                log ">>> GoLive server gracefully stopped!"
+            elif kill -9 "$pid_fallback" 2>/dev/null; then
+                log ">>> GoLive server killed!"
+            else
+                log ">>> Failed to kill GoLive server"
+            fi
+        else
+            log ">>> No active GoLive server"
+        fi
     fi
 }
 
 build_templ() {
-    echo "*** Building Temple files ***"
-    if templ generate -path . && echo ">>> Build Templ successfully"; then
-        return 0
+    log "*** Building Temple files ***"
+    if templ generate -path .; then
+        log ">>> Build Templ successfully"
     else
-        echo ">>> Templ build failed!"
+        log ">>> Templ build failed!"
         return 1
     fi
+
 }
 
 build_app() {
-    if
-        main_path=$(fd main.go --type f --exclude vendor --exclude .git | head -n1)
 
-        if [ -z "$main_path" ]; then
-            echo ">>> Could not find main.go"
-            echo ">>> There is no main.go! Waiting for changes..."
-            return 1
-        fi
+    main_path=$(fd main.go --type f --exclude vendor --exclude .git | head -n1)
 
-        main_dir=$(dirname "$main_path")
-        echo ">>> Found main.go in $main_dir"
-        echo "*** Building Go app ***"
+    if [ -z "$main_path" ]; then
+        log ">>> Could not find main.go"
+        log ">>> There is no main.go! Waiting for changes..."
+        return 1
+    fi
 
-        # Build all .go files in that folder
-        if go build -o ./goliveserver "$main_dir"/*.go && echo ">>> Build App successfully"; then
-            :
-        else
-            echo ">>> Building App Failed.., please fix!"
-            echo "*** Waiting for changes... ***"
-            return 1
-        fi
-    then
+    main_dir=$(dirname "$main_path")
+    log ">>> Found main.go in $main_dir"
+    log "*** Building Go app ***"
 
-        if [ -f goliveserver ]; then
-            echo "*** Starting GoLive server ***"
-            ./goliveserver &
-        else
-            echo ">>> Cannot find Go build file"
-            return 1
-        fi
-
-        # Check if the server was successfully started
-        if [ $? -eq 0 ]; then
-            echo "$!" >"$PID_FILE" && echo ">>> Server runs on PID: $(<"$PID_FILE")"
-        else
-            echo ">>> Failed to start GoLive server."
-            exit 1
-        fi
-        echo "*** Waiting for changes... ***"
+    # Build all .go files in that folder
+    if go build -o ./goliveserver "$main_dir"/*.go; then
+        log ">>> Build App successfully"
     else
-        echo ">>> App build failed!"
+        log ">>> Building App Failed.., please fix!"
+        log "*** Waiting for changes... ***"
+        return 1
+    fi
+
+    if [ -f goliveserver ]; then
+        log "*** Starting GoLive server ***"
+        ./goliveserver &
+        server_pid=$!
+    else
+        log ">>> Cannot find Go build file"
+        return 1
+    fi
+
+    if ps -p "$server_pid" >/dev/null 2>&1; then
+        echo "$server_pid" >"$PID_FILE"
+        # log ">>> Server runs on PID: $server_pid"
+        log "*** Waiting for changes... ***"
+    else
+        log ">>> Failed to start GoLive server."
         exit 1
     fi
+
 }
 
 # Export functions to be available for 'entr'
 export -f cleanup
 export -f build_app
 export -f build_templ
+export -f log
 
 # Trap Ctrl+C (SIGINT) and terminal close (SIGHUP) signals
-trap cleanup INT HUP
+trap cleanup INT TERM HUP
 
 # Watch *.go and *.templ for changes and execute functions
 entr -d bash -c 'cleanup && build_templ && build_app' <<<"$(fd -e go -e templ)"
 
 wait
-
-trap 'cleanup; exit 0' EXIT
