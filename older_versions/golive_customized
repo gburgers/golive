@@ -1,0 +1,143 @@
+#!/bin/bash
+
+set -e
+
+PID_FILE=".goliveserver.pid"
+export PID_FILE
+
+log() {
+  echo "[$(date '+%H:%M:%S')] $*"
+}
+
+# At the top, right after the trap line:
+trap cleanup INT TERM HUP
+
+# Add this failsafe cleanup before the initial build
+log "*** Checking for orphaned processes on port 8014 ***"
+if port_pid=$(lsof -ti:8014 2>/dev/null); then
+  if [ -n "$port_pid" ]; then
+    log ">>> Found orphaned process $port_pid on port 8014, killing it"
+    kill -9 "$port_pid" 2>/dev/null
+    sleep 1
+  fi
+fi
+
+cleanup() {
+  log ">>> Stopping server..."
+
+  # Kill by PID file
+  if [ -f "$PID_FILE" ]; then
+    pid=$(<"$PID_FILE")
+    log ">>> Killing PID $pid from file"
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE"
+  fi
+
+  # Kill ALL goliveserver processes (more aggressive pattern)
+  pkill -9 -f goliveserver 2>/dev/null || true
+
+  # Kill whatever is on port 8014
+  while port_pid=$(lsof -ti:8014 2>/dev/null); do
+    log ">>> Killing process $port_pid on port 8014"
+    kill -9 "$port_pid" 2>/dev/null || true
+    sleep 0.5
+  done
+
+  # Verify port is actually free
+  if lsof -ti:8014 >/dev/null 2>&1; then
+    log ">>> ERROR: Port 8014 still occupied after cleanup!"
+  else
+    log ">>> Port 8014 confirmed free"
+  fi
+
+  sleep 1
+  log ">>> Server stopped"
+}
+
+build_templ() {
+  log "*** Building Temple files ***"
+  if go tool templ generate -path .; then
+    log ">>> Build Templ successfully"
+  else
+    log ">>> Templ build failed!"
+    return 1
+  fi
+
+}
+
+build_app() {
+
+  main_path=$(fd main.go --type f --exclude vendor --exclude .git | head -n1)
+
+  if [ -z "$main_path" ]; then
+    log ">>> Could not find main.go"
+    log ">>> There is no main.go! Waiting for changes..."
+    return 1
+  fi
+
+  main_dir=$(dirname "$main_path")
+  log ">>> Found main.go in $main_dir"
+  log "*** Building Go app ***"
+
+  # Build all .go files in that folder
+  if go build -o ./goliveserver "$main_dir"/*.go; then
+    log ">>> Build App successfully"
+  else
+    log ">>> Building App Failed.., please fix!"
+    log "*** Waiting for changes... ***"
+    return 1
+  fi
+
+  if [ -f goliveserver ]; then
+    log "*** Starting GoLive server ***"
+    ./goliveserver &
+    server_pid=$!
+
+    # Wait a moment and check if server actually started successfully
+    sleep 0.5
+    if ps -p "$server_pid" >/dev/null 2>&1; then
+      # Check if it's actually listening on the port
+      sleep 0.5
+      if lsof -ti:8014 | grep -q "$server_pid"; then
+        echo "$server_pid" >"$PID_FILE"
+        log "*** Waiting for changes... ***"
+      else
+        log ">>> Server process exists but not listening on port"
+        kill -9 "$server_pid" 2>/dev/null || true
+        return 1
+      fi
+    else
+      log ">>> Failed to start GoLive server."
+      return 1
+    fi
+  else
+    log ">>> Cannot find Go build file"
+    return 1
+  fi
+
+}
+
+# Export functions to be available for 'entr'
+export -f cleanup
+export -f build_app
+export -f build_templ
+export -f log
+
+# Trap Ctrl+C (SIGINT) and terminal close (SIGHUP) signals
+trap cleanup INT TERM HUP
+
+# Initial build and start
+cleanup
+build_templ && build_app
+
+# Watch *.go and *.templ for changes and execute functions
+#entr -d bash -c 'cleanup && build_templ && build_app' <<<"$(fd -e go -e templ)"
+#fd -e go -e templ --exclude '*_templ.go' | entr -r bash -c 'cleanup && build_templ && build_app'
+# At the end, replace the fd/entr line with:
+#fd -e go -e templ --exclude '*_templ.go' --exclude 'goliveserver' | entr -r bash -c 'cleanup && build_templ && build_app'
+fd -e go -e templ \
+  --exclude '*_templ.go' \
+  --exclude 'goliveserver' \
+  --exclude '.goliveserver.pid' |
+  entr -rp bash -c 'cleanup && build_templ && build_app'
+wait
